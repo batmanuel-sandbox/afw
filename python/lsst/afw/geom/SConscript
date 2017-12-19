@@ -11,6 +11,7 @@ scripts.BasicSConscript.pybind11(
         'functor',
         'spherePoint/spherePoint',
         'separableXYTransform',
+        'sipApproximation',
         'span',
         'spanSet',
         'linearTransform',
