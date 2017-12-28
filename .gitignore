@@ -127,6 +127,7 @@ tests/maskedImage1
 tests/maskedImageIo1
 tests/maskedImageIo2
 tests/peak
+tests/polynomials
 tests/ramFitsIO
 tests/rowColumnStats
 tests/sipterms
