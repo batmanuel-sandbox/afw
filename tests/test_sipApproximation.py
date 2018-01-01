@@ -490,9 +490,9 @@ class SipApproximationTestCases(lsst.utils.tests.TestCase):
             gridDimensions = Extent2I(10, 10)
             approx = SipApproximation(gridDimensions=gridDimensions, **kwds)
             diffs = approx.computeMaxDeviation()
+            self.compareSolution(md, approx)
             self.assertLess(diffs[0], 1E-10)
             self.assertLess(diffs[1], 1E-10)
-            self.compareSolution(md, approx)
 
         run(self.identity)
         run(self.linear)
@@ -502,8 +502,8 @@ class SipApproximationTestCases(lsst.utils.tests.TestCase):
         # large.  As a result, we can't fit wcs22 exactly.
 
     def testFitReducedOrder(self):
-        """Check that we can fit a TAN-SIP WCS to better than 0.25 pixels when
-        we use a lower polynomial order.
+        """Check that we can fit a TAN-SIP WCS to better than 0.1 pixels when
+        we use a lower polynomial order than the actual distortion.
         """
         def run(md, **kwds2):
             kwds = extractCtorArgs(md)
@@ -511,11 +511,11 @@ class SipApproximationTestCases(lsst.utils.tests.TestCase):
             gridDimensions = Extent2I(20, 20)
             approx = SipApproximation(gridDimensions=gridDimensions, **kwds)
             diffs = approx.computeMaxDeviation()
-            self.assertLess(diffs[0], 0.25)
-            self.assertLess(diffs[1], 0.25)
+            self.assertLess(diffs[0], 0.1)
+            self.assertLess(diffs[1], 0.1)
 
         run(self.calexp03, order=3)
-        run(self.wcs22, order=5)
+        run(self.wcs22, order=8)
 
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):

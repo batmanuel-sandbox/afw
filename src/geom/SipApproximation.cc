@@ -27,100 +27,46 @@
 #include "Eigen/SVD"
 #include "Eigen/QR"
 #include "lsst/afw/geom/SipApproximation.h"
+#include "lsst/afw/math/polynomials/PolynomialFunction2d.h"
 
 namespace lsst { namespace afw { namespace geom {
 
+namespace poly = math::polynomials;
+
 namespace {
 
-//
-// 2-D POLYNOMIAL PACKING
-//
-// 2-D polynomials in this file are packed into 1-d arrays with the following ordering:
-// [(0,0), (0,1), (1,0), (0,2), (1,1), (2,0), ...]
-//
-
-// Index into the first element in a packed 2-d polynomial array with combined order n.
-int index1(int n) {
-    return n*(n+1)/2;
-}
-
-// Index into a packged 2-d polynomial array with powers p and q.
-int index2(int p, int q) {
-    return index1(p + q) + p;
-}
-
-// Class that evaluates 2-d polynomials efficiently.
-class PolynomialEvaluator {
-public:
-
-    // Construct an evaluator that evaluates polynomials of the given combined order.
-    // User must then call at() before any other methods.
-    explicit PolynomialEvaluator(int order) :
-        _order(order),
-        _xPow(_order + 1),
-        _yPow(_order + 1)
-    {
-        _xPow[0] = 1.0;
-        _yPow[0] = 1.0;
+std::pair<poly::PolynomialFunction2d, poly::PolynomialFunction2d> fitSipOneDirection(
+    int order,
+    Box2D const & box,
+    double svdThreshold,
+    std::vector<Point2D> const & input,
+    std::vector<Point2D> const & output
+) {
+    // The scaled polynomial basis evaluates polynomials after mapping the
+    // input coordinates from the given box to [-1, 1]x[-1, 1] (for numerical
+    // stability).
+    auto basis = poly::makeScaledPolynomialBasis2d(order, box);
+    auto workspace = basis.makeWorkspace();
+    Eigen::MatrixXd matrix = Eigen::MatrixXd::Zero(input.size(), basis.size());
+    Eigen::VectorXd xRhs(input.size());
+    Eigen::VectorXd yRhs(input.size());
+    for (int i = 0; i < matrix.rows(); ++i) {
+        basis.fill(input[i], matrix.row(i), workspace);
+        auto rhs = output[i] - input[i];
+        xRhs[i] = rhs.getX();
+        yRhs[i] = rhs.getY();
     }
-
-    // Set the evaluator to work at the given point in x and y.
-    void at(Point2D const & point) {
-        for (int n = 1; n <= _order; ++n) {
-#ifdef USE_POW_FOR_POLYS
-            _xPow[n] = std::pow(point.getX(), n);
-            _yPow[n] = std::pow(point.getY(), n);
-#else
-            _xPow[n] = _xPow[n - 1]*point.getX();
-            _yPow[n] = _yPow[n - 1]*point.getY();
-#endif
-        }
+    // Since we're not trying to null the zeroth- and first-order terms, the
+    // solution is just linear least squares, and we can do that with SVD.
+    auto decomp = matrix.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
+    if (svdThreshold >= 0) {
+        decomp.setThreshold(svdThreshold);
     }
-
-    // Evaluate the polynomial with the given packed coefficient vector.
-    template <typename Vector>
-    double sumWith(Vector const & coefficients) const {
-        double r = 0.0;
-        for (int n = 0, j = 0; n <= _order; ++n) {
-            for (int p = 0, q = n; p <= n; ++p, --q, ++j) {
-                assert(index2(p, q) == j);
-                r += coefficients[j]*_xPow[p]*_yPow[q];
-            }
-        }
-        return r;
-    }
-
-    // Fill a vector such that it evaluates the polynomial when its inner
-    // product with a packed coefficient vector is taken.
-    template <typename Vector>
-    void fillBasis(Vector && basis) const {
-        // Need to use universal references because this might be a non-const
-        // reference to a Matrix object or a temporary Block object passed as an
-        // rvalue (that we can nevertheless write to because it's a view).
-        for (int n = 0, j = 0; n <= _order; ++n) {
-            for (int p = 0, q = n; p <= n; ++p, --q, ++j) {
-                assert(index2(p, q) == j);
-                std::forward<Vector>(basis)[j] = _xPow[p]*_yPow[q];
-            }
-        }
-    }
-
-private:
-    int const _order;
-    Eigen::VectorXd _xPow;
-    Eigen::VectorXd _yPow;
-};
-
-// Construct a matrix that evaluates a polynomial at a list of points when multiplied by a packed
-// coefficient vector.
-Eigen::MatrixXd makePolynomialBasis(int const order, std::vector<Point2D> const & points) {
-    Eigen::MatrixXd result = Eigen::MatrixXd::Zero(points.size(), index1(order + 1));
-    PolynomialEvaluator poly(order);
-    for (int i = 0; i < result.rows(); ++i) {
-        poly.at(points[i]);
-        poly.fillBasis(result.row(i));
-    }
-    return result;
+    auto scaledX = makeFunction2d(basis, decomp.solve(xRhs));
+    auto scaledY = makeFunction2d(basis, decomp.solve(yRhs));
+    // On return, we simplify the polynomials by moving the remapping transform
+    // into the coefficients themselves.
+    return std::make_pair(simplify(scaledX), simplify(scaledY));
 }
 
 // Return a vector of points on a grid, covering the given bounding box.
@@ -138,17 +84,15 @@ std::vector<Point2D> makeGrid(Box2D const & bbox, Extent2I const & dimensions) {
     return points;
 }
 
-template <typename Vector>
-void subtractPointsIntoVectors(
-    Vector && x,
-    Vector && y,
-    std::vector<Point2D> const & a,
-    std::vector<Point2D> const & b
-) {
-    for (std::size_t i = 0; i < a.size(); ++i) {
-        std::forward<Vector>(x)[i] = a[i].getX() - b[i].getX();
-        std::forward<Vector>(y)[i] = a[i].getY() - b[i].getY();
+poly::PolynomialFunction2d readFunctionFromCoeffMatrix(ndarray::Array<double const, 2> const & coeffs) {
+    LSST_THROW_IF_NE(coeffs.getSize<0>(), coeffs.getSize<1>(), pex::exceptions::InvalidParameterError,
+                     "Coefficient matrix must be square (%d != %d).");
+    poly::PolynomialBasis2d basis(coeffs.getSize<0>() - 1);
+    Eigen::VectorXd packed(basis.size());
+    for (auto const & i : basis.getIndices()) {
+        packed[i.flat] = coeffs[i.x][i.y];
     }
+    return poly::PolynomialFunction2d(basis, packed);
 }
 
 } // anonymous
@@ -160,127 +104,101 @@ struct SipApproximation::Grid {
     // Set up the grid.
     Grid(Extent2I const & dims, SipApproximation const & parent);
 
-    Extent2I const dimensions; //  number of grid points in each dimension
-    std::vector<Point2D> dpix; //  [pixel coords] - CRPIX
-    std::vector<Point2D> siwc; //  CD^{-1}([intermediate world coords])
-    std::vector<Point2D> dpixI; //  round-tripped version of dpix if useInverse, or exactly dpix
+    Extent2I const dimensions;  //  number of grid points in each dimension
+    std::vector<Point2D> dpix1; //  [pixel coords] - CRPIX
+    std::vector<Point2D> siwc;  //  CD^{-1}([intermediate world coords])
+    std::vector<Point2D> dpix2; //  round-tripped version of dpix1 if useInverse, or exactly dpix1
 };
 
 // Private implementation object for SipApproximation that manages the solution
 struct SipApproximation::Solution {
 
-    // Solve for the best-fit coefficients.
-    Solution(int order_, double svdThreshold, SipApproximation const & parent);
+    static std::unique_ptr<Solution> fit(int order_, double svdThreshold, SipApproximation const & parent);
 
-    // Read in external coefficients.
-    Solution(ndarray::Array<double const, 2> const & a,
-             ndarray::Array<double const, 2> const & b,
-             ndarray::Array<double const, 2> const & ap,
-             ndarray::Array<double const, 2> const & bp);
+    Solution(poly::PolynomialFunction2d const & a_,
+             poly::PolynomialFunction2d const & b_,
+             poly::PolynomialFunction2d const & ap_,
+             poly::PolynomialFunction2d const & bp_) :
+        a(a_), b(b_), ap(ap_), bp(bp_)
+    {
+        LSST_THROW_IF_NE(a.getBasis().getOrder(), b.getBasis().getOrder(),
+                         pex::exceptions::InvalidParameterError,
+                         "A and B polynomials must have the same order (%d != %d).");
+        LSST_THROW_IF_NE(a.getBasis().getOrder(), ap.getBasis().getOrder(),
+                         pex::exceptions::InvalidParameterError,
+                         "A and AP polynomials must have the same order (%d != %d).");
+        LSST_THROW_IF_NE(a.getBasis().getOrder(), bp.getBasis().getOrder(),
+                         pex::exceptions::InvalidParameterError,
+                         "A and BP polynomials must have the same order (%d != %d).");
+    }
 
-    int const order;
-    Eigen::VectorXd a;   // SIP coefficients, packed
-    Eigen::VectorXd b;
-    Eigen::VectorXd ap;
-    Eigen::VectorXd bp;
+    using Workspace = poly::PolynomialFunction2d::Workspace;
+
+    Workspace makeWorkspace() const { return a.makeWorkspace(); }
+
+    Point2D applyForward(Point2D const & dpix, Workspace & ws) const {
+        return dpix + Extent2D(a(dpix, ws), b(dpix, ws));
+    }
+
+    Point2D applyInverse(Point2D const & siwc, Workspace & ws) const {
+        return siwc + Extent2D(ap(siwc, ws), bp(siwc, ws));
+    }
+
+    poly::PolynomialFunction2d a;
+    poly::PolynomialFunction2d b;
+    poly::PolynomialFunction2d ap;
+    poly::PolynomialFunction2d bp;
 };
 
 SipApproximation::Grid::Grid(Extent2I const & dims, SipApproximation const & parent) :
     dimensions(dims),
-    dpix(makeGrid(parent._bbox, dimensions)),
-    siwc(parent._pixelToIwc->applyForward(dpix)),
-    dpixI(parent._useInverse ? parent._pixelToIwc->applyInverse(siwc) : dpix)
+    dpix1(makeGrid(parent._bbox, dimensions)),
+    siwc(parent._pixelToIwc->applyForward(dpix1))
 {
-    // Apply the CRPIX offset to dpix
-    std::for_each(dpix.begin(), dpix.end(), [&parent](Point2D & p){ p -= parent._crpix; });
-    // Apply the CRPIX offset to dpixI
-    std::for_each(dpixI.begin(), dpixI.end(), [&parent](Point2D & p){ p -= parent._crpix; });
+    // Apply the CRPIX offset to make pix1 into dpix1 (in-place)
+    std::for_each(dpix1.begin(), dpix1.end(), [&parent](Point2D & p){ p -= parent._crpix; });
+
+    if (parent._useInverse) {
+        // Set from the given inverse of the given pixels-to-iwc transform
+        // Note that at this point, siwc is still just iwc, because the scaling by cdInv is later.
+        dpix2 = parent._pixelToIwc->applyInverse(siwc);
+        // Apply the CRPIX offset to make pix1 into dpix2 (in-place)
+        std::for_each(dpix2.begin(), dpix2.end(), [&parent](Point2D & p){ p -= parent._crpix; });
+    } else {
+        // Just make dpix2 = dpix1, and hence fit to the true inverse of pixels-to-iwc.
+        dpix2 = dpix1;
+    }
+
     // Apply the CD^{-1} transform to siwc
     std::for_each(siwc.begin(), siwc.end(), [&parent](Point2D & p){ p = parent._cdInv(p); });
 }
 
-SipApproximation::Solution::Solution(int order_, double svdThreshold, SipApproximation const & parent) :
-    order(order_)
-{
-    if (index1(order + 1) > static_cast<int>(parent._grid->dpix.size())) {
+std::unique_ptr<SipApproximation::Solution> SipApproximation::Solution::fit(
+    int order,
+    double svdThreshold,
+    SipApproximation const & parent
+) {
+    poly::PolynomialBasis2d basis(order);
+    if (basis.size() > parent._grid->dpix1.size()) {
         throw LSST_EXCEPT(
             pex::exceptions::LogicError,
             (boost::format("Number of parameters (%d) is larger than number of data points (%d)")
-             % (2*index1(order + 1)) % (2*parent._grid->dpix.size())).str()
+             % (2*basis.size()) % (2*parent._grid->dpix1.size())).str()
         );
     }
 
-    Eigen::VectorXd xRhs(parent._grid->dpix.size());
-    Eigen::VectorXd yRhs(parent._grid->dpix.size());
+    Box2D boxFwd(parent._bbox);
+    boxFwd.shift(-parent._crpix);
+    auto fwd = fitSipOneDirection(order, boxFwd, svdThreshold, parent._grid->dpix1, parent._grid->siwc);
 
-    // xRhs = siwc.x - dpix.x
-    // yRhs = siwc.y - dpix.y
-    subtractPointsIntoVectors(xRhs, yRhs, parent._grid->siwc, parent._grid->dpix);
-
-    // Compute the basis matrices for the forward and inverse problems.
-    auto fwdMatrix = makePolynomialBasis(order, parent._grid->dpix);
-
-    // Since we're not trying to null the zeroth- and first-order terms, the
-    // solution is just linear least squares, and we can do that with SVD.
-    auto fwdDecomp = fwdMatrix.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
-    if (svdThreshold >= 0) {
-        fwdDecomp.setThreshold(svdThreshold);
+    Box2D boxInv;
+    for (auto const & point : parent._grid->siwc) {
+        boxInv.include(point);
     }
-    a = fwdDecomp.solve(xRhs);
-    b = fwdDecomp.solve(yRhs);
+    auto inv = fitSipOneDirection(order, boxInv, svdThreshold, parent._grid->siwc, parent._grid->dpix2);
 
-    // xRhs = dpixI.x - siwc.x
-    // yRhs = dpixI.y - siwc.y
-    subtractPointsIntoVectors(xRhs, yRhs, parent._grid->dpixI, parent._grid->siwc);
-
-    auto invMatrix = makePolynomialBasis(order, parent._grid->siwc);
-
-    auto invDecomp = invMatrix.jacobiSvd(Eigen::ComputeThinU | Eigen::ComputeThinV);
-    if (svdThreshold >= 0) {
-        invDecomp.setThreshold(svdThreshold);
-    }
-
-    ap = invDecomp.solve(xRhs);
-    bp = invDecomp.solve(yRhs);
+    return std::make_unique<Solution>(fwd.first, fwd.second, inv.first, inv.second);
 }
-
-SipApproximation::Solution::Solution(
-    ndarray::Array<double const, 2> const & a_,
-    ndarray::Array<double const, 2> const & b_,
-    ndarray::Array<double const, 2> const & ap_,
-    ndarray::Array<double const, 2> const & bp_
-) :
-    order(a_.getSize<0>() - 1),
-    a(index1(order + 1)),
-    b(a.size()),
-    ap(a.size()),
-    bp(a.size())
-{
-    LSST_THROW_IF_NE(a_.getSize<0>(), a_.getSize<1>(), pex::exceptions::InvalidParameterError,
-                     "A matrix must be square (%d != %d).");
-    LSST_THROW_IF_NE(b_.getSize<0>(), b_.getSize<1>(), pex::exceptions::InvalidParameterError,
-                     "B matrix must be square (%d != %d).");
-    LSST_THROW_IF_NE(ap_.getSize<0>(), ap_.getSize<1>(), pex::exceptions::InvalidParameterError,
-                     "AP matrix must be square (%d != %d).");
-    LSST_THROW_IF_NE(bp_.getSize<0>(), bp_.getSize<1>(), pex::exceptions::InvalidParameterError,
-                     "BP matrix must be square (%d != %d).");
-    LSST_THROW_IF_NE(a_.getSize<0>(), b_.getSize<0>(), pex::exceptions::InvalidParameterError,
-                     "A and B matrices must have the same size (%d != %d).");
-    LSST_THROW_IF_NE(a_.getSize<0>(), ap_.getSize<0>(), pex::exceptions::InvalidParameterError,
-                     "A and AP matrices must have the same size (%d != %d).");
-    LSST_THROW_IF_NE(a_.getSize<0>(), bp_.getSize<0>(), pex::exceptions::InvalidParameterError,
-                     "A and BP matrices must have the same size (%d != %d).");
-    for (int n = 0, j = 0; n <= order; ++n) {
-        for (int p = 0, q = n; p <= n; ++p, --q, ++j) {
-            assert(index2(p, q) == j);
-            a[j] = a_[p][q];
-            b[j] = b_[p][q];
-            ap[j] = ap_[p][q];
-            bp[j] = bp_[p][q];
-        }
-    }
-}
-
 
 SipApproximation::SipApproximation(
     std::shared_ptr<TransformPoint2ToPoint2> pixelToIwc,
@@ -296,11 +214,10 @@ SipApproximation::SipApproximation(
     _pixelToIwc(std::move(pixelToIwc)),
     _bbox(bbox),
     _crpix(crpix),
-    _cdInv(cd.invert())
-{
-    _grid = std::make_unique<Grid>(gridDimensions, *this);
-    _solution = std::make_unique<Solution>(order, svdThreshold, *this);
-}
+    _cdInv(cd.invert()),
+    _grid(new Grid(gridDimensions, *this)),
+    _solution(Solution::fit(order, svdThreshold, *this))
+{}
 
 SipApproximation::SipApproximation(
     std::shared_ptr<TransformPoint2ToPoint2> pixelToIwc,
@@ -318,70 +235,71 @@ SipApproximation::SipApproximation(
     _pixelToIwc(std::move(pixelToIwc)),
     _bbox(bbox),
     _crpix(crpix),
-    _cdInv(cd.invert())
-{
-    _grid = std::make_unique<Grid>(gridDimensions, *this);
-    _solution = std::make_unique<Solution>(a, b, ap, bp);
-}
+    _cdInv(cd.invert()),
+    _grid(new Grid(gridDimensions, *this)),
+    _solution(
+        new Solution(
+            readFunctionFromCoeffMatrix(a),
+            readFunctionFromCoeffMatrix(b),
+            readFunctionFromCoeffMatrix(ap),
+            readFunctionFromCoeffMatrix(bp)
+        )
+    )
+{}
 
 SipApproximation::~SipApproximation() {}
 
 int SipApproximation::getOrder() const {
-    return _solution->order;
+    return _solution->a.getBasis().getOrder();
 }
 
 double SipApproximation::getA(int p, int q) const {
-    return _solution->a[index2(p, q)];
+    return _solution->a.getCoefficient(_solution->a.getBasis().index(p, q));
 }
 
 double SipApproximation::getB(int p, int q) const {
-    return _solution->b[index2(p, q)];
+    return _solution->b.getCoefficient(_solution->a.getBasis().index(p, q));
 }
 
 double SipApproximation::getAP(int p, int q) const {
-    return _solution->ap[index2(p, q)];
+    return _solution->ap.getCoefficient(_solution->a.getBasis().index(p, q));
 }
 
 double SipApproximation::getBP(int p, int q) const {
-    return _solution->bp[index2(p, q)];
+    return _solution->bp.getCoefficient(_solution->a.getBasis().index(p, q));
 }
 
-
 Point2D SipApproximation::applyForward(Point2D const & pix) const {
-    std::vector<Point2D> vec(1, pix);
-    return applyForward(vec).front();
+    auto cd = _cdInv.invert();
+    auto ws = _solution->makeWorkspace();
+    return cd(_solution->applyForward(pix - _crpix, ws));
 }
 
 std::vector<Point2D> SipApproximation::applyForward(std::vector<Point2D> const & pix) const {
-    PolynomialEvaluator poly(_solution->order);
+    auto ws = _solution->makeWorkspace();
     std::vector<Point2D> iwc;
     iwc.reserve(pix.size());
     auto cd = _cdInv.invert();
     for (auto const & point : pix) {
-        auto dpix = point - _crpix;
-        poly.at(dpix);
-        iwc.push_back(cd(dpix + Extent2D(poly.sumWith(_solution->a), poly.sumWith(_solution->b))));
+        iwc.push_back(cd(_solution->applyForward(point - _crpix, ws)));
     }
     return iwc;
 }
 
 Point2D SipApproximation::applyInverse(Point2D const & iwc) const {
-    std::vector<Point2D> vec(1, iwc);
-    return applyInverse(vec).front();
+    auto ws = _solution->makeWorkspace();
+    return _solution->applyInverse(_cdInv(iwc), ws) + _crpix;
 }
 
 std::vector<Point2D> SipApproximation::applyInverse(std::vector<Point2D> const & iwc) const {
-    PolynomialEvaluator poly(_solution->order);
+    auto ws = _solution->makeWorkspace();
     std::vector<Point2D> pix;
     pix.reserve(iwc.size());
     for (auto const & point : iwc) {
-        auto siwc = _cdInv(point);
-        poly.at(siwc);
-        pix.push_back(siwc + Extent2D(poly.sumWith(_solution->ap), poly.sumWith(_solution->bp)) + _crpix);
+        pix.push_back(_solution->applyInverse(_cdInv(point), ws) + _crpix);
     }
     return pix;
 }
-
 
 Extent2D SipApproximation::getGridStep() const {
     return Extent2D(_bbox.getWidth()/_grid->dimensions.getX(),
@@ -405,35 +323,19 @@ void SipApproximation::refineGrid(int f) {
 }
 
 void SipApproximation::fit(int order, double svdThreshold) {
-    _solution = std::make_unique<Solution>(order, svdThreshold, *this);
+    _solution = Solution::fit(order, svdThreshold, *this);
 }
-
-namespace {
-
-template <typename It1, typename It2, typename Func>
-void forEachZip(It1 it1, It1 last1, It2 it2, Func func) {
-    for (; it1 != last1; ++it1, ++it2) {
-        func(*it1, *it2);
-    }
-}
-
-} // anonymous
 
 std::pair<double, double> SipApproximation::computeMaxDeviation() const {
     std::pair<double, double> maxDiff(0.0, 0.0);
-    PolynomialEvaluator poly(_solution->order);
-    for (std::size_t i = 0; i < _grid->dpix.size(); ++i) {
-        poly.at(_grid->dpix[i]);
-        auto siwc2 = _grid->dpix[i] +
-            Extent2D(poly.sumWith(this->_solution->a), poly.sumWith(this->_solution->b));
-        poly.at(_grid->siwc[i]);
-        auto dpix2 = _grid->siwc[i] +
-            Extent2D(poly.sumWith(this->_solution->ap), poly.sumWith(this->_solution->bp));
+    auto ws = _solution->makeWorkspace();
+    for (std::size_t i = 0; i < _grid->dpix1.size(); ++i) {
+        auto siwc2 = _solution->applyForward(_grid->dpix1[i], ws);
+        auto dpix2 = _solution->applyInverse(_grid->siwc[i], ws);
         maxDiff.first = std::max(maxDiff.first, (_grid->siwc[i] - siwc2).computeNorm());
-        maxDiff.second = std::max(maxDiff.second, (_grid->dpixI[i] - dpix2).computeNorm());
+        maxDiff.second = std::max(maxDiff.second, (_grid->dpix2[i] - dpix2).computeNorm());
     }
     return maxDiff;
 }
-
 
 }}}  // namespace lsst::afw::geom
