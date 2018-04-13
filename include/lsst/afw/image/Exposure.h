@@ -29,6 +29,8 @@
 
 #include "lsst/base.h"
 #include "lsst/daf/base.h"
+#include "lsst/afw/geom/Extent.h"
+#include "lsst/afw/geom/SpherePoint.h"
 #include "lsst/afw/image/MaskedImage.h"
 #include "lsst/afw/image/ExposureInfo.h"
 
@@ -388,6 +390,19 @@ public:
     static Exposure readFits(fits::MemFileManager& manager) {
         return Exposure<ImageT, MaskT, VarianceT>(manager);
     }
+
+    /**
+     * Return an Exposure that is a small cutout of the original.
+     *
+     * @param center desired center of cutout (in RA and Dec)
+     * @param size width and height (in that order) of cutout in pixels
+     *
+     * @return An Exposure of the requested size centered on `center`. Pixels
+     *         past the edge of the original exposure will be zero.
+     *
+     * @throws lsst::pex::exceptions::LogicError Thrown if this Exposure does not have a WCS.
+     */
+    std::shared_ptr<Exposure> getCutout(geom::SpherePoint const& center, geom::Extent2I const& size) const;
 
 private:
     LSST_PERSIST_FORMATTER(lsst::afw::formatters::ExposureFormatter<ImageT, MaskT, VarianceT>)

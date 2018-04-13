@@ -195,6 +195,20 @@ void Exposure<ImageT, MaskT, VarianceT>::writeFits(fits::Fits &fitsfile,
     _info->_finishWriteFits(fitsfile, data);
 }
 
+template <typename ImageT, typename MaskT, typename VarianceT>
+std::shared_ptr<Exposure<ImageT, MaskT, VarianceT>> Exposure<ImageT, MaskT, VarianceT>::getCutout(
+        geom::SpherePoint const &center, geom::Extent2I const &size) const {
+    if (!this->hasWcs()) {
+        throw LSST_EXCEPT(pex::exceptions::LogicError, "Cannot look up source position without WCS.");
+    }
+
+    geom::Point2D cutoutCorner = this->getWcs()->skyToPixel(center);
+    cutoutCorner.shift(-geom::Extent2D(size) / 2);  // adjust origin so coord is centered
+    auto bbox = geom::Box2I(geom::Point2I(cutoutCorner), size);
+    bbox.clip(this->getBBox());  // ensure new bbox is within original image (may un-center coord somewhat)
+    return std::make_shared<Exposure>(*this, bbox, PARENT, true);  // view violates this object's constness
+}
+
 // Explicit instantiations
 /// @cond
 template class Exposure<std::uint16_t>;

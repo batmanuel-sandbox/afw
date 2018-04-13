@@ -709,6 +709,32 @@ class ExposureTestCase(lsst.utils.tests.TestCase):
             exposure3 = afwImage.ExposureF(tmpFile)
             self.assertIsNotNone(exposure3.getInfo().getCoaddInputs())
 
+    def testGetCutout(self):
+        width = 100
+        height = 50
+        cutoutSize = afwGeom.Extent2I(width, height)
+        inside = self._getExposureCenter(self.smallExposure)
+        corner = self.smallExposure.getWcs().getSkyOrigin()
+        outside = corner.offset(bearing=45*afwGeom.degrees, amount=-10*afwGeom.degrees)
+        edgeCutout = self.smallExposure.getCutout(corner, cutoutSize)
+        insideCutout = self.smallExposure.getCutout(inside, cutoutSize)
+        outsideCutout = self.smallExposure.getCutout(outside, cutoutSize)
+        self._checkCutoutProperties(insideCutout, inside, width, height)
+        self._checkCutoutProperties(edgeCutout, corner, width, height)
+        self._checkCutoutProperties(outsideCutout, outside, width, height)
+
+    # TODO: test getCutout on an Exposure with no WCS
+
+    def _checkCutoutProperties(self, cutout, center, width, height):
+        newCenter = self._getExposureCenter(cutout)
+        self.assertIsNotNone(cutout)
+        self.assertSpherePointsAlmostEqual(newCenter, center)
+        self.assertEqual(cutout.getWidth(), width)
+        self.assertEqual(cutout.getHeight(), height)
+
+    def _getExposureCenter(self, exposure):
+        return exposure.getWcs().pixelToSky(afwGeom.Box2D(exposure.getBBox()).getCenter())
+
 
 class MemoryTester(lsst.utils.tests.MemoryTestCase):
     pass
