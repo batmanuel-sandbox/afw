@@ -20,7 +20,7 @@
 # see <http://www.lsstcorp.org/LegalNotices/>.
 #
 
-__all__ = ["MultibandBase", "MultibandImage"]#, "MultibandMask", "MultibandExposure", "MultibandFootprint"]
+__all__ = ["MultibandBase", "MultibandImage"]
 
 from collections import OrderedDict
 
@@ -28,6 +28,7 @@ import numpy as np
 
 from .image.image import ImageF
 from lsst.afw.geom import Point2I, Box2I
+
 
 class MultibandBase(object):
     """Base class for multiband objects
@@ -72,7 +73,7 @@ class MultibandBase(object):
             create a new object with a slice of the original).
         deep: bool
             Whether or not this is a deep copy.
-            Only used when 
+            Only used when `singles` is a `MultibandBase`.
         kwargs: dict
             Keyword arguments to pass to `_fullInitialize` to
             initialize a new instance of an inherited class.
@@ -112,7 +113,7 @@ class MultibandBase(object):
             y0 = singles.y0
             if len(slices) > len(singles.array.shape):
                 err = "Too many indices, expected {0} but received {1}"
-                raise IndexError(err.format(len(singles.array.shape),len(slices)))
+                raise IndexError(err.format(len(singles.array.shape), len(slices)))
             if len(slices) == len(singles.array.shape):
                 xslice = slices[-1]
                 if isinstance(xslice, slice):
@@ -223,7 +224,7 @@ class MultibandBase(object):
     @property
     def x0(self):
         """X0
-    
+
         X component of XY0 `Point2I.getX()`
         """
         return self.XY0.getX()
@@ -231,7 +232,7 @@ class MultibandBase(object):
     @property
     def y0(self):
         """Y0
-    
+
         Y component of XY0 `Point2I.getY()`
         """
         return self.XY0.getY()
@@ -315,6 +316,7 @@ class MultibandBase(object):
     def __str__(self):
         return str(self.array)
 
+
 class MultibandImage(MultibandBase):
     """Multiband Image class
 
@@ -358,7 +360,7 @@ class MultibandImage(MultibandBase):
             # Attempt to load a set of images
             self.imageType = imageType
             images = []
-            for f in filters:
+            for f in self.filters:
                 if filterKwargs is not None:
                     for key, value in filterKwargs:
                         kwargs[key] = value[f]
@@ -371,8 +373,8 @@ class MultibandImage(MultibandBase):
                      is required"""
             raise NotImplementedError(err)
 
-        assert all([img.getBBox()==self.bbox for img in images])
-        assert all([type(img)==self.imageType for img in images])
+        assert all([img.getBBox() == self.bbox for img in images])
+        assert all([type(img) == self.imageType for img in images])
         self._array = np.array([image.array for image in images])
         self._updateSingles()
 
